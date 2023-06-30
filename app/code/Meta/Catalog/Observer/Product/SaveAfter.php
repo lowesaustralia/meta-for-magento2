@@ -1,4 +1,7 @@
 <?php
+
+declare(strict_types=1);
+
 /**
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
@@ -121,8 +124,9 @@ class SaveAfter implements ObserverInterface
     {
         $isActive = $this->systemConfig->isActiveExtension($storeId);
         $shouldIncrement = $this->systemConfig->isActiveIncrementalProductUpdates($storeId);
+        $catalogId = $this->systemConfig->getCatalogId($storeId);
 
-        if (!($isActive && $shouldIncrement)) {
+        if (!($isActive && $shouldIncrement && $catalogId)) {
             return;
         }
 
@@ -137,7 +141,6 @@ class SaveAfter implements ObserverInterface
             // @todo implement async call
             $this->graphApiAdapter->setDebugMode($this->systemConfig->isDebugMode($storeId))
                 ->setAccessToken($this->systemConfig->getAccessToken($storeId));
-            $catalogId = $this->systemConfig->getCatalogId($storeId);
             $requestData = $this->batchApi->buildRequestForIndividualProduct($product);
             $this->graphApiAdapter->catalogBatchRequest($catalogId, [$requestData]);
         } catch (NoSuchEntityException $e) {
