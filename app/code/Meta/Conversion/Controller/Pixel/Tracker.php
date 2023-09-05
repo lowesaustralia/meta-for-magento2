@@ -85,22 +85,24 @@ class Tracker implements HttpPostActionInterface
 
             if ($eventName) {
                 $payload = $this->pixelEvents[$eventName]->getPayload($params);
-                if (count($payload)) {
+                if (isset($payload)) {
                     // Add source and pluginVersion in the payload as custom properties
                     $payload['custom_properties'] = [];
                     $payload['custom_properties']['source'] = $this->fbeHelper->getSource();
                     $payload['custom_properties']['pluginVersion'] = $this->fbeHelper->getPluginVersion();
-
                     $eventType = $this->pixelEvents[$eventName]->getEventType();
-
                     $event = $this->serverEventFactory->createEvent($eventType, array_filter($payload), $eventId);
-                    $this->serverSideHelper->sendEvent($event);
+                    if (isset($payload['userDataFromOrder'])) {
+                        $this->serverSideHelper->sendEvent($event, $payload['userDataFromOrder']);
+                    } else {
+                        $this->serverSideHelper->sendEvent($event);
+                    }
                     $response['success'] = true;
                 }
             }
-        } catch (\Exception $ex) {
+        } catch (\Exception $e) {
             $response['success'] = false;
-            $this->fbeHelper->log(json_encode($ex));
+            $this->fbeHelper->logException($e);
         }
         $resultJson = $this->jsonFactory->create();
         $resultJson->setData($response);

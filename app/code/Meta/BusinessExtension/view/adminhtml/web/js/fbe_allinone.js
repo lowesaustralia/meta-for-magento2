@@ -152,6 +152,8 @@ var IEOverlay = require('./IEOverlay');
 var FBModal = require('./Modal');
 var FBUtils = require('./utils');
 
+const accessTokenScope = ['manage_business_extension', 'business_management', 'ads_management', 'pages_read_engagement', 'catalog_management'];
+
 var jQuery = (function (jQuery) {
   if (jQuery && typeof jQuery === 'function') {
     return jQuery;
@@ -169,6 +171,13 @@ var jQuery = (function (jQuery) {
 var ajaxify = function (url) {
   return url + '?isAjax=true&storeId=' + window.facebookBusinessExtensionConfig.storeId;
 };
+
+var getAndEncodeExternalClientMetadata = function () {
+    const metaData = {
+        customer_token: window.facebookBusinessExtensionConfig.customApiKey
+    };
+    return encodeURIComponent(JSON.stringify(metaData));
+}
 
 var ajaxParam = function (params) {
   if (window.FORM_KEY) {
@@ -217,17 +226,20 @@ jQuery('#store').on('change', function() {
       }
     },
     saveFBLoginData: function saveFBLoginData(data) {
-      var _this = this;
+      const _this = this;
       if (data) {
-        var responseObj = JSON.parse(data);
+        let responseObj = JSON.parse(data);
         _this.consoleLog("Response from fb login:");
         _this.consoleLog(responseObj);
-        var accessToken = responseObj.access_token;
-        var success = responseObj.success;
-        var pixelId = responseObj.pixel_id;
-        var profiles = responseObj.profiles;
-        var catalogId = responseObj.catalog_id;
-        var pageId = responseObj.page_id;
+        let businessManagerId = responseObj.business_manager_id;
+        let accessToken = responseObj.access_token;
+        let success = responseObj.success;
+        let pixelId = responseObj.pixel_id;
+        let profiles = responseObj.profiles;
+        let catalogId = responseObj.catalog_id;
+        let commercePartnerIntegrationId = responseObj.commerce_partner_integration_id;
+        let pageId = responseObj.page_id;
+        let installedFeatures = responseObj.installed_features;
 
         if(success) {
           let action = responseObj.action;
@@ -237,12 +249,18 @@ jQuery('#store').on('change', function() {
             _this.deleteFBAssets();
           }else if(action != null && action === 'create') {
             _this.savePixelId(pixelId);
-            _this.saveAccessToken(accessToken);
+            _this.exchangeAccessToken(accessToken, businessManagerId);
             _this.saveProfilesData(profiles);
             _this.saveAAMSettings(pixelId);
-            _this.saveConfig(accessToken, catalogId, pageId);
+            _this.saveConfig(accessToken, catalogId, pageId, commercePartnerIntegrationId);
+            _this.saveInstalledFeatures(installedFeatures);
             _this.cleanConfigCache();
-            _this.setState({installed: 'true'});
+
+            if (window.facebookBusinessExtensionConfig.isCommerceEmbeddedExtensionEnabled) {
+              window.location.reload();
+            } else {
+              _this.setState({installed: 'true'});
+            }
           }
         }else {
           _this.consoleLog("No response received after setup");
@@ -261,7 +279,7 @@ jQuery('#store').on('change', function() {
         async : false,
         data: ajaxParam({
           pixelId: pixelId,
-          storeId: window.facebookBusinessExtensionConfig.storeId, 
+          storeId: window.facebookBusinessExtensionConfig.storeId,
         }),
         success: function onSuccess(data, _textStatus, _jqXHR) {
           var response = data;
@@ -297,6 +315,32 @@ jQuery('#store').on('change', function() {
         },
         error: function () {
           console.error('There was an error saving access token');
+        }
+      });
+    },
+    exchangeAccessToken: function exchangeAccessToken(access_token, business_manager_id) {
+      const _this = this;
+      const fbeAccessTokenUrl = window.facebookBusinessExtensionConfig.fbeAccessTokenUrl;
+      if (!fbeAccessTokenUrl) {
+        console.error('Could not exchange access token. Token url not found.');
+        return;
+      }
+      let requestData = {
+          'access_token': access_token,
+          'app_id': window.facebookBusinessExtensionConfig.appId,
+          'fbe_external_business_id': window.facebookBusinessExtensionConfig.externalBusinessId,
+          'scope': accessTokenScope.join()
+      };
+      jQuery.ajax({
+        type: 'post',
+        url: fbeAccessTokenUrl.replace("business_manager_id", business_manager_id),
+        async : false,
+        data: requestData,
+        success: function onSuccess(data, _textStatus, _jqXHR) {
+            _this.saveAccessToken(data.access_token);
+        },
+        error: function () {
+          console.error('There was an error getting access_token');
         }
       });
     },
@@ -343,11 +387,37 @@ jQuery('#store').on('change', function() {
         }
       });
     },
+    saveInstalledFeatures: function saveInstalledFeatures(installedFeatures) {
+      var _this = this;
+      if (!installedFeatures) {
+        console.error('Meta Business Extension Error: got no installed_features data');
+        return;
+      }
+      jQuery.ajax({
+        type: 'post',
+        url: ajaxify(window.facebookBusinessExtensionConfig.setInstalledFeatures),
+        async : false,
+        data: ajaxParam({
+          installed_features: JSON.stringify(installedFeatures),
+        }),
+        success: function onSuccess(data, _textStatus, _jqXHR) {
+            if (data.success) {
+              _this.consoleLog('Saved installed_features data', data);
+            } else {
+              console.error('There was problem saving installed_features data', installedFeatures);
+            }
+        },
+        error: function () {
+          console.error('There was problem saving installed_features data', installedFeatures);
+        }
+      });
+    },
     cleanConfigCache : function cleanConfigCache() {
       var _this = this;
       jQuery.ajax({
         type: 'post',
         url: ajaxify(window.facebookBusinessExtensionConfig.cleanConfigCacheUrl),
+        async: false,
         data: ajaxParam({}),
         success: function onSuccess(data, _textStatus, _jqXHR) {
           if (data.success) {
@@ -359,7 +429,7 @@ jQuery('#store').on('change', function() {
         }
       });
     },
-    saveConfig: function saveConfig(accessToken, catalogId, pageId) {
+    saveConfig: function saveConfig(accessToken, catalogId, pageId, commercePartnerIntegrationId) {
       var _this = this;
       jQuery.ajax({
         type: 'post',
@@ -370,6 +440,7 @@ jQuery('#store').on('change', function() {
           catalogId: catalogId,
           pageId: pageId,
           accessToken: accessToken,
+          commercePartnerIntegrationId: commercePartnerIntegrationId,
           storeId: window.facebookBusinessExtensionConfig.storeId,
         }),
         success: function onSuccess(data, _textStatus, _jqXHR) {
@@ -423,8 +494,10 @@ jQuery('#store').on('change', function() {
              '&business_vertical='+window.facebookBusinessExtensionConfig.businessVertical+
              '&channel='+window.facebookBusinessExtensionConfig.channel+
              '&currency='+ window.facebookBusinessExtensionConfig.currency +
-             '&business_name='+ window.facebookBusinessExtensionConfig.businessName;
-     },
+             '&business_name='+ window.facebookBusinessExtensionConfig.businessName +
+             '&external_client_metadata=' + getAndEncodeExternalClientMetadata();
+
+    },
     render: function render() {
       var _this = this;
       try {

@@ -25,6 +25,8 @@ use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use GuzzleHttp\Client;
 use GuzzleHttp\Exception\BadResponseException;
 use GuzzleHttp\Exception\GuzzleException;
+use JsonException;
+use Psr\Http\Message\ResponseInterface;
 use Psr\Log\LoggerInterface;
 use Magento\Framework\HTTP\Client\CurlFactory;
 use Magento\Framework\View\FileFactory;
@@ -32,12 +34,19 @@ use Magento\Framework\View\FileFactory;
 class GraphAPIAdapter
 {
     private const ORDER_STATE_CREATED = 'CREATED';
+    public const ORDER_FILTER_REFUNDS = 'refunds';
+    public const ORDER_FILTER_CANCELLATIONS = 'cancellations';
     private const GET_ORDERS_LIMIT = 25;
 
     /**
      * @var mixed
      */
     private $accessToken;
+
+    /**
+     * @var mixed
+     */
+    private $clientAccessToken;
 
     /**
      * @var string
@@ -70,28 +79,39 @@ class GraphAPIAdapter
     private $fileFactory;
 
     /**
+     * @var GraphAPIConfig
+     */
+    private $graphAPIConfig;
+
+    /**
      * GraphAPIAdapter constructor.
      *
      * @param SystemConfig $systemConfig
      * @param LoggerInterface $logger
      * @param CurlFactory $curlFactory
      * @param FileFactory $fileFactory
+     * @param GraphAPIConfig $graphAPIConfig
      */
     public function __construct(
-        SystemConfig $systemConfig,
+        SystemConfig    $systemConfig,
         LoggerInterface $logger,
-        CurlFactory $curlFactory,
-        FileFactory $fileFactory
+        CurlFactory     $curlFactory,
+        FileFactory     $fileFactory,
+        GraphAPIConfig  $graphAPIConfig
     ) {
         $this->logger = $logger;
         $this->accessToken = $systemConfig->getAccessToken();
-        $this->client = new Client([
-            'base_uri' => "https://graph.facebook.com/v{$this->graphAPIVersion}/",
-            'timeout' => 60,
-        ]);
+        $this->clientAccessToken = $systemConfig->getClientAccessToken();
+        $this->client = new Client(
+            [
+                'base_uri' => "{$graphAPIConfig->getGraphBaseURL()}v{$this->graphAPIVersion}/",
+                'timeout' => 60,
+            ]
+        );
         $this->debugMode = $systemConfig->isDebugMode();
         $this->curlFactory = $curlFactory;
         $this->fileFactory = $fileFactory;
+        $this->graphAPIConfig = $graphAPIConfig;
     }
 
     /**
@@ -134,43 +154,109 @@ class GraphAPIAdapter
      * @param string $method
      * @param string $endpoint
      * @param array $request
-     * @return \Psr\Http\Message\ResponseInterface
+     * @return ResponseInterface
      * @throws GuzzleException
-     * @todo implement custom logger class, remove access token from logs
+     * @todo implement custom logger class
      */
     private function callApi($method, $endpoint, $request)
     {
         try {
+            $logRequest = $request;
             if ($this->debugMode) {
-                $this->logger->debug(json_encode([
-                    'endpoint' => "/{$method} {$endpoint}",
-                    'request' => $request,
-                ], JSON_PRETTY_PRINT));
+                if (isset($logRequest['access_token'])) {
+                    unset($logRequest['access_token']);
+                }
+                $this->logger->debug(
+                    json_encode(
+                        [
+                            'endpoint' => "/{$method} {$endpoint}",
+                            'request' => $logRequest,
+                        ],
+                        JSON_PRETTY_PRINT
+                    )
+                );
             }
-//            TODO: repalce with admin user local
+            // TODO: replace with admin user local
             $request['locale'] = 'en_US';
-            $response = $this->client->request($method, $endpoint, ['query' => $request]);
+
+            // post request form_params should be used as it adds data in body rather than keeping it in URL
+            $option = $method === 'POST' ? 'form_params' : 'query';
+            $response = $this->client->request($method, $endpoint, [$option => $request]);
             if ($this->debugMode) {
-                $this->logger->debug(json_encode([
-                    'response' => [
-                        'status_code' => $response->getStatusCode(),
-                        'reason_phrase' => $response->getReasonPhrase(),
-                        'headers' => json_encode(array_map(function ($a) {
-                            return $a[0];
-                        }, $response->getHeaders())),
-                        'body' => (string)$response->getBody(),
-                    ]
-                ], JSON_PRETTY_PRINT));
+                $this->logger->debug(
+                    json_encode(
+                        [
+                            'response' => [
+                                'status_code' => $response->getStatusCode(),
+                                'reason_phrase' => $response->getReasonPhrase(),
+                                'headers' => json_encode(
+                                    array_map(
+                                        function ($a) {
+                                            return $a[0];
+                                        },
+                                        $response->getHeaders()
+                                    )
+                                ),
+                                'body' => (string)$response->getBody(),
+                            ]
+                        ],
+                        JSON_PRETTY_PRINT
+                    )
+                );
             }
             return $response;
         } catch (BadResponseException $e) {
             $response = $e->getResponse();
             $this->logger->debug($e->getMessage());
-            if (stripos($e->getMessage(), 'truncated') !== 'false') {
+            if (stripos($e->getMessage(), 'truncated') !== false) {
                 $this->logger->debug('Full error: ' . (string)$response->getBody());
             }
             throw $e;
         }
+    }
+
+    /**
+     * Call api via CURL to transfer file
+     *
+     * @param string $endpoint
+     * @param array $params
+     * @param string $filePath
+     * @return mixed
+     */
+    private function callApiForFileTransfer($endpoint, $params, $filePath)
+    {
+        try {
+            $endpoint = "{$this->graphAPIConfig->getGraphBaseURL()}v{$this->graphAPIVersion}/".$endpoint;
+            $curl = $this->curlFactory->create();
+            $fileBaseName = $this->fileFactory->create(['filename' => $filePath, 'module' => ''])->getName();
+
+            $file = new CURLFile($filePath, mime_content_type($filePath), $fileBaseName);
+            $params = array_merge($params, ['file' => $file, 'access_token' => $this->accessToken]);
+            $curl->setOptions(
+                [ // This will override the $params to the post function
+                    CURLOPT_POSTFIELDS => $params
+                ]
+            );
+            $curl->post($endpoint, ['access_token' => '']); // Gets overridden, but still needs 1 param
+            $result = $curl->getBody();
+        } catch (\Exception $e) {
+            $result = $e->getMessage();
+        }
+
+        if ($this->debugMode) {
+            $this->logger->debug(
+                json_encode(
+                    [
+                        'endpoint' => "POST {$endpoint}",
+                        'file' => $filePath,
+                        'response' => $result
+                    ],
+                    JSON_PRETTY_PRINT
+                )
+            );
+        }
+
+        return json_decode($result);
     }
 
     /**
@@ -246,6 +332,26 @@ class GraphAPIAdapter
     }
 
     /**
+     * Get a URL to use to render the CommerceExtension IFrame for an onboarded Store.
+     *
+     * @param string $externalBusinessId
+     * @param mixed|null $accessToken
+     * @return string
+     * @throws GuzzleException
+     */
+    public function getCommerceExtensionIFrameURL($externalBusinessId, $accessToken = null)
+    {
+        $request = [
+            'access_token' => $accessToken ?: $this->accessToken,
+            'fields' => 'commerce_extension',
+            'fbe_external_business_id' => $externalBusinessId,
+        ];
+        $response = $this->callApi('GET', 'fbe_business', $request);
+        $response = json_decode($response->getBody()->__toString(), true);
+        return $response['commerce_extension']['uri'];
+    }
+
+    /**
      * Get commerce account data
      *
      * @param mixed $commerceAccountId
@@ -302,10 +408,14 @@ class GraphAPIAdapter
             'name'
         ];
 
-        $response = $this->callApi('GET', "{$catalogId}/product_feeds", [
-            'access_token' => $this->accessToken,
-            'fields' => implode(',', $requestFields),
-        ]);
+        $response = $this->callApi(
+            'GET',
+            "{$catalogId}/product_feeds",
+            [
+                'access_token' => $this->accessToken,
+                'fields' => implode(',', $requestFields),
+            ]
+        );
         $response = json_decode($response->getBody()->__toString(), true);
         return $response['data'];
     }
@@ -319,9 +429,13 @@ class GraphAPIAdapter
      */
     public function getFeed($feedId)
     {
-        $response = $this->callApi('GET', "{$feedId}", [
-            'access_token' => $this->accessToken,
-        ]);
+        $response = $this->callApi(
+            'GET',
+            "{$feedId}",
+            [
+                'access_token' => $this->accessToken,
+            ]
+        );
         $response = json_decode($response->getBody()->__toString(), true);
         return $response;
     }
@@ -370,30 +484,24 @@ class GraphAPIAdapter
      */
     public function pushFeed($feedId, $feed)
     {
-        $endpoint = "https://graph.facebook.com/v{$this->graphAPIVersion}/$feedId/uploads";
-        try {
-            $curl = $this->curlFactory->create();
-            $fileBaseName = $this->fileFactory->create(['filename' => $feed, 'module' => ''])->getName();
+        $endpoint = "{$feedId}/uploads";
+        return $this->callApiForFileTransfer($endpoint, [], $feed);
+    }
 
-            $file = new CURLFile($feed, mime_content_type($feed), $fileBaseName);
-            $curl->setOptions([ // This will override the $params to the post function
-                CURLOPT_POSTFIELDS => ['file' => $file, 'access_token' => $this->accessToken]
-            ]);
-            $curl->post($endpoint, ['access_token' => '']); // Gets overridden, but still needs 1 param
-            $result = $curl->getBody();
-        } catch (\Exception $e) {
-            $result = $e->getMessage();
-        }
-
-        if ($this->debugMode) {
-            $this->logger->debug(json_encode([
-                'endpoint' => "POST {$endpoint}",
-                'file' => $feed,
-                'response' => $result
-            ], JSON_PRETTY_PRINT));
-        }
-
-        return json_decode($result);
+    /**
+     * Upload file
+     *
+     * @param mixed $commercePartnerIntegrationId
+     * @param string $filePath
+     * @param string $feedType
+     * @param string $updateType
+     * @return mixed
+     */
+    public function uploadFile($commercePartnerIntegrationId, $filePath, $feedType, $updateType)
+    {
+        $endpoint = "{$commercePartnerIntegrationId}/file_update";
+        $params = ['feed_type' => $feedType, 'update_type' => $updateType, 'update_time' => strtotime('now')];
+        return $this->callApiForFileTransfer($endpoint, $params, $filePath);
     }
 
     /**
@@ -406,13 +514,33 @@ class GraphAPIAdapter
      */
     public function catalogBatchRequest($catalogId, $requests)
     {
-        $response = $this->callApi('POST', "{$catalogId}/items_batch", [
-            'access_token' => $this->accessToken,
-            'requests' => json_encode($requests),
-            'item_type' => 'PRODUCT_ITEM'
-        ]);
+        $response = $this->callApi(
+            'POST',
+            "{$catalogId}/items_batch",
+            [
+                'access_token' => $this->accessToken,
+                'requests' => json_encode($requests),
+                'item_type' => 'PRODUCT_ITEM'
+            ]
+        );
         $response = json_decode($response->getBody()->__toString(), true);
         return $response;
+    }
+
+    /**
+     * GraphAPI batch request
+     *
+     * @param array $requests
+     * @return mixed|ResponseInterface
+     * @throws GuzzleException
+     */
+    public function graphAPIBatchRequest(array $requests)
+    {
+        $response = $this->callApi('POST', '', [
+            'access_token' => $this->accessToken,
+            'batch' => json_encode($requests)
+        ]);
+        return json_decode($response->getBody()->__toString(), true);
     }
 
     /**
@@ -420,10 +548,11 @@ class GraphAPIAdapter
      *
      * @param mixed $pageId
      * @param false|string $cursorAfter
+     * @param string $filterType
      * @return array
      * @throws GuzzleException
      */
-    public function getOrders($pageId, $cursorAfter = false)
+    public function getOrders($pageId, $cursorAfter = false, $filterType = "")
     {
         $requestFields = [
             'id',
@@ -441,15 +570,69 @@ class GraphAPIAdapter
         ];
         $request = [
             'access_token' => $this->accessToken,
-            'state' => self::ORDER_STATE_CREATED,
             'fields' => implode(',', $requestFields),
             'limit' => self::GET_ORDERS_LIMIT,
         ];
+        if ($filterType === self::ORDER_FILTER_REFUNDS) {
+            $request['state'] = 'CREATED,IN_PROGRESS,COMPLETED';
+            $request['filters'] = 'has_refunds'; // Filter for orders with refunds
+        } elseif ($filterType === self::ORDER_FILTER_CANCELLATIONS) {
+            $request['state'] = 'CREATED,IN_PROGRESS,COMPLETED';
+            $request['filters'] = 'has_cancellations'; // Filter for orders with refunds
+        }
+
+        // Only consider orders updated 180 days or less ago
+        // This is for the return case.
+        $date180DaysAgo = time() - (180 * 24 * 60 * 60);
+        $request['updated_after'] = $date180DaysAgo;
+
         if ($cursorAfter) {
             $request['after'] = $cursorAfter;
         }
         $response = $this->callApi('GET', "{$pageId}/commerce_orders", $request);
         return json_decode($response->getBody()->__toString(), true);
+    }
+
+    /**
+     * Get refunds for a specific order. Returns an array of refund_order_item
+     *
+     * @param string $orderId
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getRefunds($orderId)
+    {
+        $requestFields = [
+            'id',
+            'items{product_id,retailer_id,refund_subtotal,quantity}',
+            'refund_reason',
+            'refund_amount{subtotal,shipping,tax,total,amount,currency}',
+        ];
+        $request = [
+            'access_token' => $this->accessToken,
+            'fields' => implode(',', $requestFields),
+        ];
+        $response = $this->callApi('GET', "{$orderId}/refunds", $request);
+        return json_decode($response->getBody()->__toString(), true)['data'];
+    }
+
+    /**
+     * Get cancellations for a specific order. Returns an array of cancel_order_item
+     *
+     * @param string $orderId
+     * @return array
+     * @throws GuzzleException
+     */
+    public function getCancellations($orderId)
+    {
+        // Construct the request
+        $request = [
+            'access_token' => $this->accessToken,
+        ];
+        // Call the API
+        $response = $this->callApi('GET', "{$orderId}/cancellations", $request);
+        // Decode and return the data
+        return json_decode($response->getBody()->__toString(), true)['data'];
     }
 
     /**
@@ -491,11 +674,15 @@ class GraphAPIAdapter
         foreach ($orderIds as $magentoOrderId => $fbOrderId) {
             $request[] = ['id' => $fbOrderId, 'merchant_order_reference' => $magentoOrderId];
         }
-        $response = $this->callApi('POST', "{$pageId}/acknowledge_orders", [
-            'access_token' => $this->accessToken,
-            'idempotency_key' => $this->getUniqId(),
-            'orders' => json_encode($request),
-        ]);
+        $response = $this->callApi(
+            'POST',
+            "{$pageId}/acknowledge_orders",
+            [
+                'access_token' => $this->accessToken,
+                'idempotency_key' => $this->getUniqId(),
+                'orders' => json_encode($request),
+            ]
+        );
         return json_decode($response->getBody()->__toString(), true);
     }
 
@@ -511,10 +698,12 @@ class GraphAPIAdapter
      */
     public function markOrderAsShipped($fbOrderId, $items, $trackingInfo, $fulfillmentAddressData)
     {
-        $request = ['access_token' => $this->accessToken,
+        $request = [
+            'access_token' => $this->accessToken,
             'idempotency_key' => $this->getUniqId(),
             'items' => json_encode($items),
-            'tracking_info' => json_encode($trackingInfo),];
+            'tracking_info' => json_encode($trackingInfo),
+        ];
         if ($fulfillmentAddressData) {
             $request['should_use_default_fulfillment_location'] = false;
             $request['fulfillment']['fulfillment_address'] = $fulfillmentAddressData;
@@ -540,12 +729,16 @@ class GraphAPIAdapter
             'reason_code' => 'CUSTOMER_REQUESTED',
             'reason_description' => 'Cancelled from Magento',
         ];
-        $response = $this->callApi('POST', "{$fbOrderId}/cancellations", [
-            'access_token' => $this->accessToken,
-            'idempotency_key' => $this->getUniqId(),
-            'cancel_reason' => $cancelReason,
-            'restock_items' => true,
-        ]);
+        $response = $this->callApi(
+            'POST',
+            "{$fbOrderId}/cancellations",
+            [
+                'access_token' => $this->accessToken,
+                'idempotency_key' => $this->getUniqId(),
+                'cancel_reason' => $cancelReason,
+                'restock_items' => true,
+            ]
+        );
         $response = json_decode($response->getBody()->__toString(), true);
         return $response;
     }
@@ -556,28 +749,48 @@ class GraphAPIAdapter
      * @param mixed $fbOrderId
      * @param array $items
      * @param float|null $shippingRefundAmount
+     * @param float|null $deductionAmount
      * @param string $currency Order's currency code. Examples: "USD", "GBP"
      * @param null|string $reasonText
      * @return mixed|\Psr\Http\Message\ResponseInterface
      * @throws GuzzleException
      */
-    public function refundOrder($fbOrderId, $items, $shippingRefundAmount, $currency, $reasonText = null)
-    {
+    public function refundOrder(
+        $fbOrderId,
+        $items,
+        $shippingRefundAmount,
+        $deductionAmount,
+        $currency,
+        $reasonText = null
+    ) {
         $request = [
             'access_token' => $this->accessToken,
             'idempotency_key' => $this->getUniqId(),
             'reason_code' => 'REFUND_REASON_OTHER',
             'reason_text' => $reasonText,
             'items' => json_encode($items),
-            'shipping' => json_encode([
-                'shipping_refund' => [
-                    'amount' => $shippingRefundAmount,
-                    'currency' => $currency
+            'shipping' => json_encode(
+                [
+                    'shipping_refund' => [
+                        'amount' => $shippingRefundAmount,
+                        'currency' => $currency
+                    ]
                 ]
-            ]),
+            ),
         ];
         if ($reasonText) {
             $request['reason_text'] = $reasonText;
+        }
+        if ($deductionAmount > 0) {
+            $request['deductions'] = json_encode([
+                [
+                    'deduction_type' => 'RETURN_SHIPPING',
+                    'deduction_amount' => [
+                        'amount' => $deductionAmount,
+                        'currency' => $currency
+                    ]
+                ]
+            ]);
         }
 
         $response = $this->callApi('POST', "{$fbOrderId}/refunds", $request);
@@ -607,7 +820,7 @@ class GraphAPIAdapter
     }
 
     /**
-     * Get product by retailer Id
+     * Get product by retailer ID
      *
      * @param mixed $catalogId
      * @param bool|int|string $retailerId
@@ -674,5 +887,87 @@ class GraphAPIAdapter
         ];
         $response = $this->callApi('GET', "{$catalogId}", $request);
         return json_decode($response->getBody()->__toString(), true);
+    }
+
+    /**
+     * Get FBE Installs
+     *
+     * @param string $accessToken
+     * @param string $externalBusinessId
+     * @return mixed
+     * @throws GuzzleException
+     * @throws JsonException
+     */
+    public function getFBEInstalls($accessToken, $externalBusinessId)
+    {
+        $request = [
+            'fbe_external_business_id' => $externalBusinessId,
+            'access_token' => $accessToken,
+        ];
+        $response = $this->callApi('GET', "/fbe_business/fbe_installs", $request);
+        return json_decode($response->getBody()->__toString(), true, 512, JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * Persist log to Meta
+     *
+     * @param mixed[] $context
+     * @return mixed
+     * @throws GuzzleException
+     */
+    public function persistLogToMeta($context)
+    {
+        $extraData = $this->getContextData($context, 'extra_data', []);
+        $token = $this->accessToken;
+        if (!$token) {
+            $token = $this->clientAccessToken;
+            $extraData = array_merge($extraData, ['access_token_used' => 'client']);
+        }
+
+        $request = [
+            'access_token' => $token,
+            'event' => $this->getContextData($context, 'event'),
+            'event_type' => $this->getContextData($context, 'event_type'),
+            'commerce_merchant_settings_id' => $this->getContextData($context, 'commerce_merchant_settings_id'),
+            'exception_message' => $this->getContextData($context, 'exception_message'),
+            'exception_trace' => $this->getContextData($context, 'exception_trace'),
+            'exception_code' => $this->getContextData($context, 'exception_code'),
+            'exception_class' => $this->getContextData($context, 'exception_class'),
+            'catalog_id' => $this->getContextData($context, 'catalog_id'),
+            'order_id' => $this->getContextData($context, 'order_id'),
+            'promotion_id' => $this->getContextData($context, 'promotion_id'),
+            'flow_name' => $this->getContextData($context, 'flow_name'),
+            'flow_step' => $this->getContextData($context, 'flow_step'),
+            'incoming_params' => $this->getContextData($context, 'incoming_params'),
+            'seller_platform_app_version' => $this->getContextData($context, 'seller_platform_app_version'),
+            'extra_data' => $extraData,
+        ];
+
+        $response = $this->callApi('POST', "commerce_seller_logs", $request);
+        $response = json_decode($response->getBody()->__toString(), true);
+        return $response;
+    }
+
+    /**
+     * Gets a value from the context array, or a default if the key is not set
+     *
+     * @param array $context
+     * @param string $key
+     * @param mixed $default
+     * @return mixed
+     */
+    private function getContextData(array $context, string $key, $default = null)
+    {
+        return $context[$key] ?? $default;
+    }
+
+    /**
+     * Get Graph api version
+     *
+     * @return string
+     */
+    public function getGraphApiVersion()
+    {
+        return 'v' . $this->graphAPIVersion;
     }
 }

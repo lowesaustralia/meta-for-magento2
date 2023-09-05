@@ -100,6 +100,14 @@ class PromotionFeedUpload extends AbstractAjax
         } catch (Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
+            $this->fbeHelper->logExceptionImmediatelyToMeta(
+                $e,
+                [
+                    'store_id' => $storeId,
+                    'event' => 'promotion_sync',
+                    'event_type' => 'manual_sync'
+                ]
+            );
         }
         return $response;
     }

@@ -80,9 +80,11 @@ class PersistConfiguration extends AbstractAjax
             $externalBusinessId = $this->getRequest()->getParam('externalBusinessId');
             $catalogId = $this->getRequest()->getParam('catalogId');
             $pageId = $this->getRequest()->getParam('pageId');
+            $commercePartnerIntegrationId = $this->getRequest()->getParam('commercePartnerIntegrationId');
 
             $this->saveExternalBusinessId($externalBusinessId, $storeId)
                 ->saveCatalogId($catalogId, $storeId)
+                ->saveCommercePartnerIntegrationId($commercePartnerIntegrationId, $storeId)
                 ->saveInstalledFlag($storeId)
                 ->completeOnsiteOnboarding($accessToken, $pageId, $storeId);
 
@@ -92,7 +94,14 @@ class PersistConfiguration extends AbstractAjax
         } catch (\Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
-            $this->fbeHelper->logException($e);
+            $this->fbeHelper->logExceptionImmediatelyToMeta(
+                $e,
+                [
+                    'store_id' => $storeId,
+                    'event' => 'persist_configuration',
+                    'event_type' => 'save_config'
+                ]
+            );
             return $response;
         }
     }
@@ -113,6 +122,27 @@ class PersistConfiguration extends AbstractAjax
                 $storeId
             );
             $this->fbeHelper->log('Catalog ID saved on instance --- '. $catalogId);
+        }
+        return $this;
+    }
+
+    /**
+     * Save commerce partner integration id
+     *
+     * @param int $commercePartnerIntegrationId
+     * @param int $storeId
+     * @return $this
+     */
+    public function saveCommercePartnerIntegrationId($commercePartnerIntegrationId, $storeId)
+    {
+        if ($commercePartnerIntegrationId) {
+            $this->systemConfig->saveConfig(
+                SystemConfig::XML_PATH_FACEBOOK_BUSINESS_EXTENSION_COMMERCE_PARTNER_INTEGRATION_ID,
+                $commercePartnerIntegrationId,
+                $storeId
+            );
+            $this->fbeHelper->log('Commerce Partner Integration ID saved on instance --- '
+                . $commercePartnerIntegrationId);
         }
         return $this;
     }

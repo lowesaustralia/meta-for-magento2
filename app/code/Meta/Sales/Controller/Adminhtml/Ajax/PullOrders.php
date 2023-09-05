@@ -54,10 +54,10 @@ class PullOrders extends AbstractAjax
      * @param CommerceHelper $commerceHelper
      */
     public function __construct(
-        Context $context,
-        JsonFactory $resultJsonFactory,
-        SystemConfig $systemConfig,
-        FBEHelper $fbeHelper,
+        Context        $context,
+        JsonFactory    $resultJsonFactory,
+        SystemConfig   $systemConfig,
+        FBEHelper      $fbeHelper,
         CommerceHelper $commerceHelper
     ) {
         parent::__construct($context, $resultJsonFactory, $fbeHelper);
@@ -89,13 +89,31 @@ class PullOrders extends AbstractAjax
             return $response;
         }
 
+        $response = [];
+        $errors = [];
+
         try {
-            return ['success' => true, 'response' => $this->commerceHelper->pullPendingOrders((int)$storeId)];
+            $response['synced_orders'] = $this->commerceHelper->pullPendingOrders((int)$storeId);
         } catch (Exception $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $this->fbeHelper->logException($e);
-            return ['success' => false, 'error_message' => $e->getMessage()];
+            $errors['failed_orders'] = $e->getMessage();
         }
+
+        try {
+            $response['synced_refunds'] = $this->commerceHelper->pullRefundOrders((int)$storeId);
+        } catch (Exception $e) {
+            $errors['failed_refunds'] = $e->getMessage();
+        }
+
+        try {
+            $response['synced_cancellations'] = $this->commerceHelper->pullCancelledOrders((int)$storeId);
+        } catch (Exception $e) {
+            $errors['failed_cancellations'] = $e->getMessage();
+        }
+
+        return [
+            'success' => true,
+            'response' => $response,
+            'errors' => $errors
+        ];
     }
 }

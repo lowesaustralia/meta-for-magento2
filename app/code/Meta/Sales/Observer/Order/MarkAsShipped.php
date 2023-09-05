@@ -97,11 +97,11 @@ class MarkAsShipped implements ObserverInterface
             $this->shipper->markAsShipped($shipment);
         } catch (GuzzleException $e) {
             $response = $e->getResponse();
-            $body = json_decode($response->getBody());
-            throw new Exception(__(
+            $body = json_decode((string)$response->getBody());
+            throw new LocalizedException(__(
                 'Error code: "%1"; Error message: "%2"',
                 (string)$body->error->code,
-                (string)($body->error->message ?? $body->error->error_user_msg)
+                (string)($body->error->error_user_msg ?? $body->error->message)
             ));
         }
     }

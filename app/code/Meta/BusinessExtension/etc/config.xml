@@ -1,10 +1,15 @@
 <?xml version="1.0"?>
-<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Store:etc/config.xsd">
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Store:etc/config.xsd">
     <default>
         <facebook>
             <business_extension>
                 <active>1</active>
                 <onsite>0</onsite>
+                <commerce_extension>0</commerce_extension>
+                <meta_exception_logging_enabled>1</meta_exception_logging_enabled>
+                <meta_telemetry_logging_enabled>0</meta_telemetry_logging_enabled>
+                <client_access_token>195311308289826|52dcd04d6c7ed113121b5eb4be23b4a7</client_access_token>
             </business_extension>
             <catalog_management>
                 <product_identifier>sku</product_identifier>
@@ -12,6 +17,12 @@
             <debug>
                 <debug_mode>1</debug_mode>
             </debug>
+            <!-- Internal. Overrides default graph base URL
+            <internal>
+                <graph_base_url>
+                    https://graph.facebook.com/
+                </graph_base_url>
+            </internal> -->
         </facebook>
     </default>
 </config>

@@ -19,15 +19,27 @@ declare(strict_types=1);
  */
 namespace Meta\Catalog\Model\Product\Feed\ProductRetriever;
 
+use Magento\Catalog\Api\ProductRepositoryInterface;
+use Magento\Catalog\Model\Product\Visibility;
+use Magento\Framework\Api\SearchCriteriaBuilder;
 use Meta\BusinessExtension\Helper\FBEHelper;
 use Meta\Catalog\Model\Product\Feed\ProductRetrieverInterface;
 use Magento\Catalog\Model\Product\Type as ProductType;
-use Magento\Catalog\Model\Product\Visibility;
 use Magento\Catalog\Model\ResourceModel\Product\CollectionFactory;
 
 class Simple implements ProductRetrieverInterface
 {
     private const LIMIT = 2000;
+
+    /**
+     * @var ProductRepositoryInterface
+     */
+    private $productRepo;
+
+    /**
+     * @var SearchCriteriaBuilder
+     */
+    private $searchCriteriaBuilder;
 
     /**
      * @var int
@@ -47,11 +59,19 @@ class Simple implements ProductRetrieverInterface
     /**
      * @param FBEHelper $fbeHelper
      * @param CollectionFactory $productCollectionFactory
+     * @param ProductRepositoryInterface $productRepo
+     * @param SearchCriteriaBuilder $searchCriteriaBuilder
      */
-    public function __construct(FBEHelper $fbeHelper, CollectionFactory $productCollectionFactory)
-    {
+    public function __construct(
+        FBEHelper $fbeHelper,
+        CollectionFactory $productCollectionFactory,
+        ProductRepositoryInterface $productRepo,
+        SearchCriteriaBuilder $searchCriteriaBuilder
+    ) {
         $this->fbeHelper = $fbeHelper;
         $this->productCollectionFactory = $productCollectionFactory;
+        $this->productRepo = $productRepo;
+        $this->searchCriteriaBuilder = $searchCriteriaBuilder;
     }
 
     /**
@@ -61,14 +81,6 @@ class Simple implements ProductRetrieverInterface
     {
         $this->storeId = $storeId;
         return $this;
-    }
-
-    /**
-     * @inheritDoc
-     */
-    public function getProductType()
-    {
-        return ProductType::TYPE_SIMPLE;
     }
 
     /**
@@ -95,7 +107,7 @@ class Simple implements ProductRetrieverInterface
                     'null' => true
                 ]
             ], null, 'left')
-            ->addAttributeToFilter('type_id', $this->getProductType())
+            ->addAttributeToFilter('type_id', ProductType::TYPE_SIMPLE)
             ->addStoreFilter($storeId)
             ->setStoreId($storeId);
 
@@ -106,7 +118,12 @@ class Simple implements ProductRetrieverInterface
             ->order(new \Zend_Db_Expr('e.updated_at desc'))
             ->limit($limit, $offset);
 
-        return $collection->getItems();
+        $search = $this
+            ->searchCriteriaBuilder
+            ->addFilter('entity_id', array_keys($collection->getItems()), 'in')
+            ->create();
+
+        return $this->productRepo->getList($search)->getItems();
     }
 
     /**

@@ -5,60 +5,95 @@
  */
 ?>
 
-<select id="store">
-    <option value="select-store"><?= $escaper->escapeHtml(__('Select store')) ?></option>
-    <?php foreach ($block->getStores() as $key => $store): ?>
-        <?php if ($key !== 'admin'): ?>
+<?php if (empty($block->getSelectableStores())): ?>
+    Create a Store to continue with setup.
+<?php else: ?>
+    <script>
+        window.facebookBusinessExtensionConfig = {
+            popupOrigin: "https://business.facebook.com",
+            setPixelId: '<?= $escaper->escapeHtml($block->getPixelAjaxRoute()) ?>',
+            setAccessToken: '<?= $escaper->escapeHtml($block->getAccessTokenAjaxRoute()) ?>',
+            setProfilesData: '<?= $escaper->escapeHtml($block->getProfilesAjaxRoute()) ?>',
+            saveConfig: '<?= $escaper->escapeHtml($block->fetchConfigurationAjaxRoute()) ?>',
+            cleanConfigCacheUrl: '<?= $escaper->escapeHtml($block->getCleanCacheAjaxRoute()) ?>',
+            fbeLoginUrl: "https://business.facebook.com/fbe-iframe-get-started/?",
+            deleteConfigKeys: '<?= $escaper->escapeHtml($block->getDeleteAssetIdsAjaxRoute()) ?>',
+            appId: '<?= $escaper->escapeHtml($block->getAppId()) ?>',
+            timeZone: 'America/Los_Angeles',
+            businessVertical: 'ECOMMERCE',
+            channel: 'COMMERCE',
+            currency: '<?= $escaper->escapeHtml($block->getCurrencyCode()) ?>',
+            storeId: '<?= $escaper->escapeHtml($block->getSelectedStoreId()) ?>',
+            businessName: 'Magento',
+            debug: true,
+            isCommerceEmbeddedExtensionEnabled: <?=$block->isCommerceExtensionEnabled() ? 'true' : 'false'?>,
+            setAAMSettings: '<?= $escaper->escapeHtml($block->getAAMSettingsRoute()) ?>',
+            fbeAccessTokenUrl: '<?= $escaper->escapeHtml($block->getFbeAccessTokenUrl()) ?>',
+            fbeInstallsConfigUrl: '<?= $escaper->escapeHtml($block->getFbeInstallsConfigUrl()) ?>',
+            fbeInstallsSaveUrl: '<?= $escaper->escapeHtml($block->getFbeInstallsSaveUrl()) ?>',
+            setInstalledFeatures: '<?= $escaper->escapeHtml($block->getInstalledFeaturesAjaxRouteUrl()) ?>',
+            customApiKey: '<?= $escaper->escapeHtml($block->getCustomApiKey()) ?>'
+
+        }
+    </script>
+    <select id="store">
+        <?php foreach ($block->getSelectableStores() as $store): ?>
             <option
-                value="<?= $escaper->escapeHtmlAttr($store['store_id']) ?>"
-                data-installed="<?= $escaper->escapeHtmlAttr($block->isFBEInstalled($store['store_id'])) ?>"
-                data-pixel-id="<?= $escaper->escapeHtmlAttr($block->fetchPixelId($store['store_id'])) ?>"
-                data-system-user-name=
+                    value="<?= $escaper->escapeHtmlAttr($store['store_id']) ?>"
+                    data-installed="<?= $escaper->escapeHtmlAttr($block->isFBEInstalled($store['store_id']) ? 'true' : 'false') ?>"
+                    data-pixel-id="<?= $escaper->escapeHtmlAttr($block->fetchPixelId($store['store_id'])) ?>"
+                    data-system-user-name=
                     "<?= $escaper->escapeHtmlAttr($block->getExternalBusinessId($store['store_id'])) ?>"
-                data-external-business-id=
+                    data-external-business-id=
                     "<?= $escaper->escapeHtmlAttr($block->getExternalBusinessId($store['store_id'])) ?>"
-                <?php if ($store->isDefault() && $store->getWebsiteId() === $block->getFirstWebsiteId()): ?>
+                <?php if ($store['store_id'] === $block->getSelectedStoreId()): ?>
                     data-selected="true"
+                    selected="selected"
                 <?php endif; ?>
             ><?= $escaper->escapeHtml(__($store['name'])) ?></option>
-       <?php endif; ?>
-    <?php endforeach; ?>
-</select>
-<div>
-    <div id="fbe-iframe">
-    </div>
-</div>
+        <?php endforeach; ?>
+    </select>
+    <?php if ($block->isCommerceExtensionEnabled() && $block->isFBEInstalled($block->getSelectedStoreId())): ?>
+        <iframe
+                id="commerce-extension-iframe"
+                src="<?= $escaper->escapeHtmlAttr($block->getCommerceExtensionIFrameURL($block->getSelectedStoreId())) ?>"
+                scrolling="no"
+                style="border: 0; width: 100%; margin: 16px 0;min-height:50vh;"></iframe>
+        <script>
+            require([
+                'jquery',
+                'Meta_BusinessExtension/js/commerce_extension_allinone'
+            ], function ($) {
+                $('#store').on('change', function () {
+                    const url = new URL(location.href);
+                    url.searchParams.set('store_id', jQuery(this).val());
 
-<script>
-    window.facebookBusinessExtensionConfig = {
-        popupOrigin: "https://business.facebook.com"
-        , setPixelId: '<?= $escaper->escapeHtml($block->getPixelAjaxRoute()) ?>'
-        , setAccessToken: '<?= $escaper->escapeHtml($block->getAccessTokenAjaxRoute()) ?>'
-        , setProfilesData: '<?= $escaper->escapeHtml($block->getProfilesAjaxRoute()) ?>'
-        , saveConfig: '<?= $escaper->escapeHtml($block->fetchConfigurationAjaxRoute()) ?>'
-        , cleanConfigCacheUrl: '<?= $escaper->escapeHtml($block->getCleanCacheAjaxRoute()) ?>'
-        , fbeLoginUrl: "https://business.facebook.com/fbe-iframe-get-started/?"
-        , deleteConfigKeys: '<?= $escaper->escapeHtml($block->getDeleteAssetIdsAjaxRoute()) ?>'
-        , appId: '<?= $escaper->escapeHtml($block->getAppId()) ?>'
-        , timeZone: 'America/Los_Angeles'
-        , businessVertical: 'ECOMMERCE'
-        , channel: 'COMMERCE'
-        , currency: '<?= $escaper->escapeHtml($block->getCurrencyCode()) ?>'
-        , businessName: 'Magento'
-        , debug: true
-        , setAAMSettings: '<?= $escaper->escapeHtml($block->getAAMSettingsRoute()) ?>'
-    };
-</script>
-<script>
-    require([
-        'jquery',
-        'Meta_BusinessExtension/js/fbe_allinone'
-    ], function ($) {
-        var installedDefault = $('#store option[data-selected="true"][data-installed="true"]');
-        if (installedDefault.length) {
-            installedDefault.attr('selected', 'selected').change();
-        } else {
-            $('#store option[data-installed="true"]').first().attr('selected', 'selected').change();
-        }
-    });
-</script>
+                    location.assign(url.search);
+                });
+            });
+        </script>
+    <?php else: ?>
+        <div>
+            <div id="fbe-iframe">
+            </div>
+        </div>
+        <script>
+            require([
+                'jquery',
+                'Meta_BusinessExtension/js/fbe_allinone',
+                'Meta_BusinessExtension/js/fbe_installs'
+            ], function ($, fbeAllInOne, fbeInstalls) {
+                // Initialize FBE to the server-selected Store.
+                var selectedStore = $('#store option[data-selected="true"]');
+                selectedStore.attr('selected', 'selected').change();
+
+                $('#store').on('change', function () {
+                    const url = new URL(location.href);
+                    url.searchParams.set('store_id', jQuery(this).val());
+                    location.assign(url.search);
+                });
+                fbeInstalls.startFBEInstallsProcess();
+            });
+        </script>
+    <?php endif; ?>
+<?php endif; ?>

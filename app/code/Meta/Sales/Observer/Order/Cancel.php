@@ -24,9 +24,11 @@ use Exception;
 use GuzzleHttp\Exception\GuzzleException;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
+use Magento\Framework\Exception\LocalizedException;
 use Magento\Sales\Model\Order;
 use Meta\BusinessExtension\Helper\GraphAPIAdapter;
 use Meta\BusinessExtension\Model\System\Config as SystemConfig;
+use Meta\Sales\Model\Order\CreateCancellation;
 
 class Cancel implements ObserverInterface
 {
@@ -47,7 +49,7 @@ class Cancel implements ObserverInterface
      * @param GraphAPIAdapter $graphAPIAdapter
      */
     public function __construct(
-        SystemConfig $systemConfig,
+        SystemConfig    $systemConfig,
         GraphAPIAdapter $graphAPIAdapter
     ) {
         $this->systemConfig = $systemConfig;
@@ -71,6 +73,16 @@ class Cancel implements ObserverInterface
             && $this->systemConfig->isActiveOrderSync($storeId)
             && $this->systemConfig->isOnsiteCheckoutEnabled($storeId))) {
             return;
+        }
+
+        $statusHistory = $order->getStatusHistoryCollection();
+        foreach ($statusHistory as $historyItem) {
+            if ($historyItem->getComment() &&
+                strpos($historyItem->getComment(), CreateCancellation::CANCELLATION_NOTE) !== false
+            ) {
+                // No-op if order was originally canceled on Facebook -- avoid infinite cancel loop.
+                return;
+            }
         }
 
         $facebookOrderId = $order->getExtensionAttributes()->getFacebookOrderId();
@@ -101,11 +113,11 @@ class Cancel implements ObserverInterface
             $this->graphAPIAdapter->cancelOrder($fbOrderId);
         } catch (GuzzleException $e) {
             $response = $e->getResponse();
-            $body = json_decode($response->getBody());
-            throw new Exception(__(
+            $body = json_decode((string)$response->getBody());
+            throw new LocalizedException(__(
                 'Error code: "%1"; Error message: "%2"',
                 (string)$body->error->code,
-                (string)($body->error->message ?? $body->error->error_user_msg)
+                (string)($body->error->error_user_msg ?? $body->error->message)
             ));
         }
     }

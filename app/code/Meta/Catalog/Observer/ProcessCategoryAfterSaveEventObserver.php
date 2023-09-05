@@ -20,26 +20,43 @@ declare(strict_types=1);
 
 namespace Meta\Catalog\Observer;
 
-use Meta\BusinessExtension\Helper\FBEHelper;
-use Meta\Catalog\Model\Feed\CategoryCollection;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
+use Magento\Framework\Message\ManagerInterface;
+use Meta\BusinessExtension\Helper\FBEHelper;
+use Meta\Catalog\Model\Feed\CategoryCollection;
 
 class ProcessCategoryAfterSaveEventObserver implements ObserverInterface
 {
     /**
+     * @var CategoryCollection
+     */
+    private $categoryCollection;
+
+    /**
      * @var FBEHelper
      */
-    private $_fbeHelper;
+    private $fbeHelper;
+
+    /**
+     * @var ManagerInterface
+     */
+    private $messageManager;
 
     /**
      * Constructor
      * @param FBEHelper $helper
+     * @param CategoryCollection $categoryCollection
+     * @param ManagerInterface $messageManager
      */
     public function __construct(
-        FBEHelper $helper
+        FBEHelper          $helper,
+        CategoryCollection $categoryCollection,
+        ManagerInterface   $messageManager
     ) {
-        $this->_fbeHelper = $helper;
+        $this->fbeHelper = $helper;
+        $this->categoryCollection = $categoryCollection;
+        $this->messageManager = $messageManager;
     }
 
     /**
@@ -49,21 +66,40 @@ class ProcessCategoryAfterSaveEventObserver implements ObserverInterface
      * after save category from Magento
      *
      * @param Observer $observer
-     * @return
+     * @return void
      */
     public function execute(Observer $observer)
     {
+        /** @var Category $category */
         $category = $observer->getEvent()->getCategory();
-        $this->_fbeHelper->log("save category: " . $category->getName());
-        /** @var CategoryCollection $categoryObj */
-        $categoryObj = $this->_fbeHelper->getObject(CategoryCollection::class);
-        $syncEnabled =$category->getData("sync_to_facebook_catalog");
-        if ($syncEnabled === "0") {
-            $this->_fbeHelper->log("user disabled category sync");
-            return;
-        }
 
-        $response = $categoryObj->makeHttpRequestAfterCategorySave($category);
-        return $response;
+        $isNameChanged = $category->dataHasChangedFor('name');
+
+        // we only pass category name and products ids to meta, so ignoring all other changes
+        if ($isNameChanged
+            || !empty($category->getAffectedProductIds())
+            || $category->dataHasChangedFor('image')
+            || $category->dataHasChangedFor('request_path')
+            || $category->dataHasChangedFor('url_key')
+        ) {
+            $this->fbeHelper->log("save category: " . $category->getName());
+            try {
+                $this->categoryCollection->makeHttpRequestsAfterCategorySave(
+                    $category,
+                    $isNameChanged
+                );
+            } catch (\Throwable $e) {
+                $this->messageManager->addErrorMessage(
+                    'Failed to update Meta for one or more stores. Please see Exception log for more detail.'
+                );
+                $this->fbeHelper->log(sprintf(
+                    "Error occurred while updating category: %s , id: %s",
+                    $category->getName(),
+                    $category->getId()
+                ));
+
+                $this->fbeHelper->logException($e);
+            }
+        }
     }
 }

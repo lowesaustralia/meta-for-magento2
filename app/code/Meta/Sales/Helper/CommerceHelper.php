@@ -26,7 +26,9 @@ use Magento\Sales\Model\Order;
 use Meta\BusinessExtension\Helper\GraphAPIAdapter;
 use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use Meta\Sales\Model\Order\CreateOrder;
-use Psr\Log\LoggerInterface;
+use Meta\Sales\Model\Order\CreateRefund;
+use Meta\Sales\Model\Order\CreateCancellation;
+use Meta\BusinessExtension\Helper\FBEHelper;
 
 /**
  * Helper class to sync (to magento), mark shipped, cancel,
@@ -45,14 +47,24 @@ class CommerceHelper
     private SystemConfig $systemConfig;
 
     /**
-     * @var LoggerInterface
-     */
-    private LoggerInterface $logger;
-
-    /**
      * @var CreateOrder
      */
     private CreateOrder $createOrder;
+
+    /**
+     * @var FBEHelper
+     */
+    private $fbeHelper;
+
+    /**
+     * @var CreateRefund
+     */
+    private CreateRefund $createRefund;
+
+    /**
+     * @var CreateCancellation
+     */
+    private CreateCancellation $createCancellation;
 
     /**
      * @var int
@@ -72,19 +84,25 @@ class CommerceHelper
     /**
      * @param GraphAPIAdapter $graphAPIAdapter
      * @param SystemConfig $systemConfig
-     * @param LoggerInterface $logger
      * @param CreateOrder $createOrder
+     * @param CreateRefund $createRefund
+     * @param CreateCancellation $createCancellation
+     * @param FBEHelper $fbeHelper
      */
     public function __construct(
-        GraphAPIAdapter $graphAPIAdapter,
-        SystemConfig $systemConfig,
-        LoggerInterface $logger,
-        CreateOrder $createOrder
+        GraphAPIAdapter    $graphAPIAdapter,
+        SystemConfig       $systemConfig,
+        CreateOrder        $createOrder,
+        CreateRefund       $createRefund,
+        CreateCancellation $createCancellation,
+        FBEHelper          $fbeHelper
     ) {
         $this->graphAPIAdapter = $graphAPIAdapter;
         $this->systemConfig = $systemConfig;
-        $this->logger = $logger;
         $this->createOrder = $createOrder;
+        $this->createRefund = $createRefund;
+        $this->fbeHelper = $fbeHelper;
+        $this->createCancellation = $createCancellation;
     }
 
     /**
@@ -97,12 +115,12 @@ class CommerceHelper
      */
     public function pullOrders(int $storeId, $cursorAfter = false)
     {
-        $pageId = $this->systemConfig->getPageId($storeId);
+        $ordersRootId = $this->systemConfig->getCommerceAccountId($storeId) ?: $this->systemConfig->getPageId($storeId);
         $this->graphAPIAdapter
             ->setDebugMode($this->systemConfig->isDebugMode($storeId))
             ->setAccessToken($this->systemConfig->getAccessToken($storeId));
 
-        $ordersData = $this->graphAPIAdapter->getOrders($pageId, $cursorAfter);
+        $ordersData = $this->graphAPIAdapter->getOrders($ordersRootId, $cursorAfter);
 
         $this->ordersPulledTotal += count($ordersData['data']);
 
@@ -115,16 +133,111 @@ class CommerceHelper
                 $orderIds[$magentoOrder->getIncrementId()] = $facebookOrderId;
             } catch (Exception $e) {
                 $this->exceptions[] = $e->getMessage();
-                $this->logger->critical($e->getMessage());
+                $this->fbeHelper->logExceptionImmediatelyToMeta(
+                    $e,
+                    [
+                        'store_id' => $storeId,
+                        'event' => 'order_sync',
+                        'event_type' => 'create_magento_orders'
+                    ]
+                );
             }
         }
         if (!empty($orderIds)) {
-            $this->graphAPIAdapter->acknowledgeOrders($pageId, $orderIds);
+            $this->graphAPIAdapter->acknowledgeOrders($ordersRootId, $orderIds);
         }
-
         if (isset($ordersData['paging']['next'])) {
             $this->pullOrders($storeId, $ordersData['paging']['cursors']['after']);
         }
+    }
+
+    /**
+     * Pulls orders that have refunds and fetches the corresponding refund details.
+     *
+     * @param int $storeId Store ID for which the refund orders need to be pulled.
+     * @return array Associative array containing the refund details with Facebook Order IDs as keys.
+     * @throws GuzzleException
+     */
+    public function pullRefundOrders(int $storeId)
+    {
+        $ordersRootId = $this->systemConfig->getCommerceAccountId($storeId) ?: $this->systemConfig->getPageId($storeId);
+        $this->graphAPIAdapter
+            ->setDebugMode($this->systemConfig->isDebugMode($storeId))
+            ->setAccessToken($this->systemConfig->getAccessToken($storeId));
+
+        // Pull orders with refunds
+        $ordersWithRefunds = $this->graphAPIAdapter->getOrders(
+            $ordersRootId,
+            false,
+            GraphAPIAdapter::ORDER_FILTER_REFUNDS
+        );
+        $refundOrdersDetails = [];
+
+        foreach ($ordersWithRefunds['data'] as $orderData) {
+            try {
+                $facebookOrderId = $orderData['id'];
+                // Get refund details for each order
+                $refundDetails = $this->graphAPIAdapter->getRefunds($facebookOrderId)[0];
+                $this->createRefund->execute($orderData, $refundDetails, $storeId);
+                $refundOrdersDetails[$facebookOrderId] = $refundDetails;
+            } catch (Exception $e) {
+                $this->exceptions[] = $e->getMessage();
+                $this->fbeHelper->logExceptionImmediatelyToMeta(
+                    $e,
+                    [
+                        'store_id' => $storeId,
+                        'event' => 'order_sync',
+                        'event_type' => 'create_magento_orders'
+                    ]
+                );
+            }
+        }
+        return $refundOrdersDetails;
+    }
+
+    /**
+     * Pulls orders that are cancelled and fetches the corresponding cancellation details.
+     *
+     * @param int $storeId Store ID for which the cancelled orders need to be pulled.
+     * @return array Associative array containing the cancellation details with Facebook Order IDs as keys.
+     * @throws GuzzleException
+     */
+    public function pullCancelledOrders(int $storeId)
+    {
+        $ordersRootId = $this->systemConfig->getCommerceAccountId($storeId) ?: $this->systemConfig->getPageId($storeId);
+        $this->graphAPIAdapter
+            ->setDebugMode($this->systemConfig->isDebugMode($storeId))
+            ->setAccessToken($this->systemConfig->getAccessToken($storeId));
+
+        // Pull orders with cancellations
+        $ordersWithCancellations = $this->graphAPIAdapter->getOrders(
+            $ordersRootId,
+            false,
+            GraphAPIAdapter::ORDER_FILTER_CANCELLATIONS
+        );
+        $cancelledOrdersDetails = [];
+
+        foreach ($ordersWithCancellations['data'] as $orderData) {
+            try {
+                $facebookOrderId = $orderData['id'];
+                // Get cancellation details for each order (assuming a method exists in GraphAPIAdapter)
+                $cancellationDetails = $this->graphAPIAdapter->getCancellations($facebookOrderId)[0];
+                // Process cancellations (you would need to create a method to handle this)
+                $this->createCancellation->execute($orderData, $cancellationDetails, $storeId);
+                $cancelledOrdersDetails[$facebookOrderId] = $cancellationDetails;
+            } catch (Exception $e) {
+                $this->exceptions[] = $e->getMessage();
+                $this->fbeHelper->logExceptionImmediatelyToMeta(
+                    $e,
+                    [
+                        'store_id' => $storeId,
+                        'event' => 'order_sync',
+                        'event_type' => 'process_cancellations'
+                    ]
+                );
+            }
+        }
+        return $cancelledOrdersDetails;
     }
 
     /**

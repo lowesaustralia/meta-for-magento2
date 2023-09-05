@@ -26,16 +26,25 @@ use Magento\Framework\App\ProductMetadata as FrameworkProductMetaData;
 use Magento\Framework\ObjectManagerInterface;
 use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use FacebookAds\Object\ServerSide\AdsPixelSettings;
+use Magento\Framework\Exception\LocalizedException;
 use Magento\Store\Api\Data\StoreInterface;
 use Magento\Store\Model\StoreManagerInterface;
+use Magento\Security\Model\AdminSessionsManager;
+use Throwable;
 
+/**
+ * @SuppressWarnings(PHPMD.CouplingBetweenObjects)
+ */
 class FBEHelper
 {
-    public const FB_GRAPH_BASE_URL = "https://graph.facebook.com/";
-
-    private const MODULE_NAME = "Meta_BusinessExtension";
-
     private const URL_TYPE_WEB = 'web';
+
+    public const PERSIST_META_LOG_IMMEDIATELY = 'persist_meta_log_immediately';
+
+    /**
+     * @var GraphAPIConfig
+     */
+    private $graphAPIConfig;
 
     /**
      * @var ObjectManagerInterface
@@ -63,6 +72,11 @@ class FBEHelper
     private $productMetadata;
 
     /**
+     * @var GraphAPIAdapter
+     */
+    private GraphAPIAdapter $graphAPIAdapter;
+
+    /**
      * FBEHelper constructor
      *
      * @param ObjectManagerInterface $objectManager
@@ -70,19 +84,43 @@ class FBEHelper
      * @param StoreManagerInterface $storeManager
      * @param SystemConfig $systemConfig
      * @param ProductMetadataInterface $productMetadata
+     * @param GraphAPIConfig $graphAPIConfig
+     * @param GraphAPIAdapter $graphAPIAdapter
      */
     public function __construct(
-        ObjectManagerInterface $objectManager,
-        Logger $logger,
-        StoreManagerInterface $storeManager,
-        SystemConfig $systemConfig,
-        ProductMetadataInterface $productMetadata
+        ObjectManagerInterface   $objectManager,
+        Logger                   $logger,
+        StoreManagerInterface    $storeManager,
+        SystemConfig             $systemConfig,
+        ProductMetadataInterface $productMetadata,
+        GraphAPIConfig           $graphAPIConfig,
+        GraphAPIAdapter          $graphAPIAdapter
     ) {
         $this->objectManager = $objectManager;
         $this->storeManager = $storeManager;
         $this->logger = $logger;
         $this->systemConfig = $systemConfig;
         $this->productMetadata = $productMetadata;
+        $this->graphAPIConfig = $graphAPIConfig;
+        $this->graphAPIAdapter = $graphAPIAdapter;
+    }
+
+    /**
+     * Get Graph API adapter
+     *
+     * @return GraphAPIAdapter
+     */
+    public function getGraphAPIAdapter(): GraphAPIAdapter
+    {
+        return $this->graphAPIAdapter;
+    }
+
+    /**
+     * Returns the properly configured Graph Base URL
+     */
+    public function getGraphBaseURL()
+    {
+        return $this->graphAPIConfig->getGraphBaseURL();
     }
 
     /**
@@ -185,7 +223,8 @@ class FBEHelper
      */
     public function getStore()
     {
-        return $this->storeManager->getDefaultStoreView();
+        $current_store = $this->storeManager->getStore();
+        return $current_store ?: $this->storeManager->getDefaultStoreView();
     }
 
     /**
@@ -220,32 +259,88 @@ class FBEHelper
      * Log
      *
      * @param string $info
+     * @param mixed[] $context
      */
-    public function log($info)
+    public function log($info, array $context = [])
     {
-        $this->logger->info($info);
+        if (!isset($context['log_type']) || !$this->systemConfig->isMetaTelemetryLoggingEnabled()) {
+            $this->logger->info($info);
+            return;
+        }
+
+        if (isset($context['store_id'])) {
+            $context['commerce_merchant_settings_id'] = $this->systemConfig->getCommerceAccountId($context['store_id']);
+        }
+
+        $timestamp = ['timestamp' => time()];
+        if (isset($context['extra_data'])) {
+            $context['extra_data'] = array_merge($context['extra_data'], $timestamp);
+        } else {
+            $context['extra_data'] = $timestamp;
+        }
+        $this->logger->info($info, $context);
     }
 
     /**
      * Log critical
      *
      * @param string $message
+     * @param mixed[] $context
      */
-    public function logCritical($message)
+    public function logCritical($message, array $context = [])
     {
-        $this->logger->critical($message);
+        $this->logger->critical($message, $context);
     }
 
     /**
      * Log exception
      *
-     * @param \Exception $e
+     * @param Throwable $e
+     * @param array $context
      */
-    public function logException(\Exception $e)
+    public function logException(Throwable $e, array $context = [])
     {
-        $this->logger->error($e->getMessage());
-        $this->logger->error($e->getTraceAsString());
-        $this->logger->error($e);
+        $errorMessage = $e->getMessage();
+        $exceptionTrace = $e->getTraceAsString();
+
+        // If the log type is not set or Meta extension logging is not enabled just log the error message and trace.
+        if (!isset($context['log_type']) || !$this->systemConfig->isMetaExceptionLoggingEnabled()) {
+            $this->logger->error($errorMessage);
+            $this->logger->error($exceptionTrace);
+            return;
+        }
+
+        $context['exception_message'] = $errorMessage;
+        $context['exception_code'] = $e->getCode();
+        $context['exception_trace'] = $exceptionTrace;
+
+        if (isset($context['store_id'])) {
+            $context['commerce_merchant_settings_id'] = $this->systemConfig->getCommerceAccountId($context['store_id']);
+        }
+
+        $context['seller_platform_app_version'] = $this->getMagentoVersion();
+
+        // Add extension version to the extra data.
+        $extensionVersion = ['extension_version' => $this->systemConfig->getModuleVersion()];
+        if (isset($context['extra_data'])) {
+            $context['extra_data'] = array_merge($context['extra_data'], $extensionVersion);
+        } else {
+            $context['extra_data'] = $extensionVersion;
+        }
+
+        $this->logger->error($errorMessage, $context);
+    }
+
+    /**
+     * Log exception and persist immediately with Meta
+     *
+     * @param Throwable $e
+     * @param array $context
+     */
+    public function logExceptionImmediatelyToMeta(Throwable $e, array $context = [])
+    {
+        $context['log_type'] = self::PERSIST_META_LOG_IMMEDIATELY;
+        $this->logException($e, $context);
     }
 
     /**
@@ -338,5 +433,36 @@ class FBEHelper
             return $this->saveAAMSettings($settings, $storeId);
         }
         return null;
+    }
+
+    /**
+     * Check admin permissions
+     *
+     * @param string $pixelId
+     * @param int $storeId
+     * @return void
+     */
+    public function checkAdminEndpointPermission()
+    {
+        $adminSession = $this->createObject(AdminSessionsManager::class)
+            ->getCurrentSession();
+        if (!$adminSession || $adminSession->getStatus() != 1) {
+            throw new LocalizedException(__('This endpoint is for logged in admin and ajax only.'));
+        }
+    }
+
+    /**
+     * Get fbe access token url endpoint
+     *
+     * @return string
+     */
+    public function getFbeAccessTokenUrl()
+    {
+        $apiVersion = $this->graphAPIAdapter->getGraphApiVersion();
+        if (!$apiVersion) {
+            return null;
+        }
+        $baseUrl = $this->getGraphBaseURL();
+        return "{$baseUrl}/{$apiVersion}/business_manager_id/access_token";
     }
 }

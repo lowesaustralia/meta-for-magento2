@@ -23,10 +23,13 @@ namespace Meta\Catalog\Model\Product\Feed\Builder;
 use Exception;
 use Magento\Catalog\Model\Product;
 use Magento\Framework\Currency;
+use Magento\Framework\Module\Manager as ModuleManager;
+use Magento\Framework\ObjectManagerInterface;
 use Magento\Framework\Pricing\PriceCurrencyInterface;
 use Magento\Framework\Escaper;
 use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use Magento\Catalog\Helper\Data as CatalogHelper;
+use Magento\Store\Model\StoreManagerInterface;
 
 class Tools
 {
@@ -34,6 +37,11 @@ class Tools
      * @var PriceCurrencyInterface
      */
     private $priceCurrency;
+
+    /**
+     * @var ObjectManagerInterface
+     */
+    private $objectManager;
 
     /**
      * @var Escaper
@@ -51,23 +59,42 @@ class Tools
     private $catalogHelper;
 
     /**
+     * @var ModuleManager
+     */
+    private ModuleManager $moduleManager;
+
+    /**
+     * @var StoreManagerInterface
+     */
+    private $storeManager;
+
+    /**
      * Tools constructor
      *
      * @param PriceCurrencyInterface $priceCurrency
+     * @param ObjectManagerInterface $objectManager
      * @param Escaper $escaper
      * @param SystemConfig $systemConfig
      * @param CatalogHelper $catalogHelper
+     * @param ModuleManager $moduleManager
+     * @param StoreManagerInterface $storeManager
      */
     public function __construct(
         PriceCurrencyInterface $priceCurrency,
+        ObjectManagerInterface $objectManager,
         Escaper $escaper,
         SystemConfig $systemConfig,
-        CatalogHelper $catalogHelper
+        CatalogHelper $catalogHelper,
+        ModuleManager $moduleManager,
+        StoreManagerInterface $storeManager
     ) {
         $this->priceCurrency = $priceCurrency;
+        $this->objectManager = $objectManager;
         $this->escaper = $escaper;
         $this->systemConfig = $systemConfig;
         $this->catalogHelper = $catalogHelper;
+        $this->moduleManager = $moduleManager;
+        $this->storeManager = $storeManager;
     }
 
     /**
@@ -107,15 +134,14 @@ class Tools
      */
     public function formatPrice($price, $storeId = null)
     {
-        $currencyModel = $this->priceCurrency->getCurrency($storeId);
-        $currencySymbol = $currencyModel->getCurrencySymbol();
-
-        $amount = $this->priceCurrency->convert($price, $storeId, $currencyModel);
+        $baseCurrency = $this->storeManager->getStore()->getBaseCurrency();
+        $currencySymbol = $baseCurrency->getCurrencySymbol();
+        $amount = $this->priceCurrency->convert($price, $storeId, $baseCurrency);
         try {
             $price = sprintf(
                 '%s %s',
-                $currencyModel->formatTxt($amount, ['display' => Currency::NO_SYMBOL]),
-                $currencyModel->getCode()
+                $baseCurrency->formatTxt($amount, ['display' => Currency::NO_SYMBOL]),
+                $baseCurrency->getCode()
             );
             // workaround for 2.4.3
             $price = trim($price, $currencySymbol);
@@ -140,22 +166,7 @@ class Tools
             return '';
         }
 
-        $currencyModel = $this->priceCurrency->getCurrency($product->getStoreId());
-        $currencySymbol = $currencyModel->getCurrencySymbol();
-
-        try {
-            $price = sprintf(
-                "{'value':'%s','currency':'%s','unit':'%s'}",
-                $currencyModel->formatTxt($value, ['display' => Currency::NO_SYMBOL]),
-                $currencyModel->getCode(),
-                $unit
-            );
-            // workaround for 2.4.3
-            $price = trim($price, $currencySymbol);
-            return $price;
-        } catch (Exception $e) {
-            return '';
-        }
+        return $this->formatPrice($value, $product->getStoreId());
     }
 
     /**
@@ -226,5 +237,20 @@ class Tools
             return sprintf("%s/%s", $salePriceStartDate, $salePriceEndDate);
         }
         return '';
+    }
+
+    /**
+     * Get inventory object
+     *
+     * @return InventoryInterface
+     */
+    public function getInventoryObject(): InventoryInterface
+    {
+        // Fallback to Magento_CatalogInventory in case Magento MSI modules are disabled
+        //phpcs:disable Magento2.PHP.LiteralNamespaces
+        return $this->moduleManager->isEnabled('Magento_InventorySalesApi')
+            ? $this->objectManager->get('Meta\Catalog\Model\Product\Feed\Builder\MultiSourceInventory')
+            : $this->objectManager->get('Meta\Catalog\Model\Product\Feed\Builder\Inventory');
+        //phpcs:enable Magento2.PHP.LiteralNamespaces
     }
 }

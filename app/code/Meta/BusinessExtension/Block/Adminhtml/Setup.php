@@ -21,11 +21,15 @@ declare(strict_types=1);
 namespace Meta\BusinessExtension\Block\Adminhtml;
 
 use Meta\BusinessExtension\Helper\FBEHelper;
+use Meta\BusinessExtension\Helper\GraphAPIAdapter;
 use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use Magento\Backend\Block\Template\Context;
 use Magento\Backend\Block\Template;
+use Magento\Framework\App\RequestInterface;
+use Magento\Framework\Exception\NoSuchEntityException;
 use Magento\Store\Api\StoreRepositoryInterface;
 use Magento\Store\Model\ResourceModel\Website\CollectionFactory as WebsiteCollectionFactory;
+use Meta\BusinessExtension\Helper\ApiKeyService;
 
 /**
  * @api
@@ -33,9 +37,23 @@ use Magento\Store\Model\ResourceModel\Website\CollectionFactory as WebsiteCollec
 class Setup extends Template
 {
     /**
+     * @var ApiKeyService
+     */
+    private $apiKeyService;
+    /**
      * @var FBEHelper
      */
     private $fbeHelper;
+
+    /**
+     * @var GraphAPIAdapter
+     */
+    private $graphAPIAdapter;
+
+    /**
+     * @var RequestInterface
+     */
+    private $request;
 
     /**
      * @var SystemConfig
@@ -54,25 +72,68 @@ class Setup extends Template
 
     /**
      * @param Context $context
+     * @param RequestInterface $request
      * @param FBEHelper $fbeHelper
      * @param SystemConfig $systemConfig
+     * @param GraphAPIAdapter $graphAPIAdapter
      * @param StoreRepositoryInterface $storeRepo
      * @param WebsiteCollectionFactory $websiteCollectionFactory
+     * @param ApiKeyService $apiKeyService
      * @param array $data
      */
     public function __construct(
-        Context $context,
-        FBEHelper $fbeHelper,
-        SystemConfig $systemConfig,
+        Context                  $context,
+        RequestInterface         $request,
+        FBEHelper                $fbeHelper,
+        SystemConfig             $systemConfig,
+        GraphAPIAdapter          $graphAPIAdapter,
         StoreRepositoryInterface $storeRepo,
         WebsiteCollectionFactory $websiteCollectionFactory,
-        array $data = []
+        ApiKeyService            $apiKeyService,
+        array                    $data = []
     ) {
         $this->fbeHelper = $fbeHelper;
         parent::__construct($context, $data);
+        $this->request = $request;
         $this->systemConfig = $systemConfig;
+        $this->graphAPIAdapter = $graphAPIAdapter;
         $this->storeRepo = $storeRepo;
         $this->websiteCollectionFactory = $websiteCollectionFactory;
+        $this->apiKeyService = $apiKeyService;
+    }
+
+    /**
+     * ID of the selected Store.
+     *
+     * @return string|null
+     */
+    public function getSelectedStoreId()
+    {
+        $stores = $this->getSelectableStores();
+        if (empty($stores)) {
+            return null;
+        }
+
+        // If there is a store matching query param, return it.
+        $requestStoreId = $this->request->getParam('store_id');
+        try {
+            $this->storeRepo->getById($requestStoreId);
+            return $requestStoreId;
+        } catch (NoSuchEntityException $e) {
+            // Store not found, fallback to default store selection logic.
+            $requestStoreId = null;
+        }
+
+        // Missing or invalid query param, look for a default.
+        foreach ($stores as $store) {
+            if ($store->isDefault() && $store->getWebsiteId() === $this->getFirstWebsiteId()) {
+                return $store['store_id'];
+            }
+        }
+
+        // No default found, return the first store.
+        $firstStore = array_slice($stores, 0, 1)[0];
+        return $firstStore['store_id'];
     }
 
     /**
@@ -124,6 +185,16 @@ class Setup extends Template
     public function fetchPixelId($storeId)
     {
         return $this->systemConfig->getPixelId($storeId);
+    }
+
+    /**
+     * Whether or not to enable the new Commerce Extension UI
+     *
+     * @return bool
+     */
+    public function isCommerceExtensionEnabled()
+    {
+        return $this->systemConfig->isCommerceExtensionEnabled();
     }
 
     /**
@@ -188,11 +259,25 @@ class Setup extends Template
      * Is fbe installed
      *
      * @param int $storeId
-     * @return string
+     * @return bool
      */
     public function isFBEInstalled($storeId)
     {
-        return $this->systemConfig->isFBEInstalled($storeId) ? 'true' : 'false';
+        return $this->systemConfig->isFBEInstalled($storeId);
+    }
+
+    /**
+     * Get a URL to use to render the CommerceExtension IFrame for an onboarded Store.
+     *
+     * @param int $storeId
+     * @return string
+     */
+    public function getCommerceExtensionIFrameURL($storeId)
+    {
+        return $this->graphAPIAdapter->getCommerceExtensionIFrameURL(
+            $this->systemConfig->getExternalBusinessId($storeId),
+            $this->systemConfig->getAccessToken($storeId),
+        );
     }
 
     /**
@@ -206,13 +291,19 @@ class Setup extends Template
     }
 
     /**
-     * Get stores
+     * Get stores that are selectable (not Admin).
      *
      * @return \Magento\Store\Api\Data\StoreInterface[]
      */
-    public function getStores()
+    public function getSelectableStores()
     {
-        return $this->storeRepo->getList();
+        $stores = $this->storeRepo->getList();
+
+        return array_filter(
+            $stores,
+            fn($key) => $key !== 'admin',
+            ARRAY_FILTER_USE_KEY,
+        );
     }
 
     /**
@@ -228,5 +319,95 @@ class Setup extends Template
         $collection->getSelect()->order('website_id ASC')->limit(1);
 
         return $collection->getFirstItem()->getWebsiteId();
+    }
+
+    /**
+     * Get fbe access token url endpoint
+     *
+     * @return string
+     */
+    public function getFbeAccessTokenUrl()
+    {
+        return $this->fbeHelper->getFbeAccessTokenUrl();
+    }
+
+    /**
+     * Get fbe installs config url endpoint
+     *
+     * @return string
+     */
+    public function getFbeInstallsConfigUrl()
+    {
+        return $this->fbeHelper->getUrl('fbeadmin/ajax/fbeinstallsconfig');
+    }
+
+    /**
+     * Get fbe installs save url endpoint
+     *
+     * @return string
+     */
+    public function getFbeInstallsSaveUrl()
+    {
+        return $this->fbeHelper->getUrl('fbeadmin/ajax/fbeinstallssave');
+    }
+
+    /**
+     * Get store id from request paramater
+     *
+     * @return string
+     */
+    public function getStoreId()
+    {
+        return $this->getRequest()->getParam('store');
+    }
+
+    /**
+     * Get fbe installs save url endpoint
+     *
+     * @return string
+     */
+    public function getInstalledFeaturesAjaxRouteUrl()
+    {
+        return $this->fbeHelper->getUrl('fbeadmin/ajax/fbinstalledfeatures');
+    }
+
+    /**
+     * Get store id from request paramater
+     *
+     * @return string
+     */
+    public function getWebsiteId()
+    {
+        return $this->getRequest()->getParam('website');
+    }
+
+    /**
+     * Get default store_id
+     *
+     * @return string
+     */
+    public function getDefaultStoreViewId()
+    {
+        return $this->fbeHelper->getStore()->getId();
+    }
+
+    /**
+     * Call this method to check and generate the API key
+     *
+     * @return string
+     */
+    public function upsertApiKey()
+    {
+        return $this->apiKeyService->upsertApiKey();
+    }
+
+    /**
+     * Call this method to Get the existing Api key or generate and return it.
+     *
+     * @return string
+     */
+    public function getCustomApiKey(): string
+    {
+        return $this->apiKeyService->getCustomApiKey();
     }
 }

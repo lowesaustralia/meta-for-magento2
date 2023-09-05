@@ -26,6 +26,7 @@ use Meta\BusinessExtension\Model\System\Config as SystemConfig;
 use Meta\Catalog\Model\Product\Feed\Builder;
 use Meta\Catalog\Model\Product\Feed\ProductRetriever\Configurable as ConfigurableProductRetriever;
 use Meta\Catalog\Model\Product\Feed\ProductRetriever\Simple as SimpleProductRetriever;
+use Meta\Catalog\Model\Product\Feed\ProductRetriever\Other as OtherProductRetriever;
 use Meta\Catalog\Model\Product\Feed\ProductRetrieverInterface;
 use Magento\Catalog\Model\Product;
 use Magento\Framework\Exception\LocalizedException;
@@ -34,6 +35,7 @@ class BatchApi
 {
     private const ATTR_METHOD = 'method';
     private const ATTR_UPDATE = 'UPDATE';
+    private const ATTR_DELETE = 'DELETE';
     private const ATTR_DATA = 'data';
 
     // Process only the maximum allowed by API per request
@@ -75,6 +77,7 @@ class BatchApi
      * @param SystemConfig $systemConfig
      * @param SimpleProductRetriever $simpleProductRetriever
      * @param ConfigurableProductRetriever $configurableProductRetriever
+     * @param OtherProductRetriever $otherProductRetriever
      * @param Builder $builder
      */
     public function __construct(
@@ -83,6 +86,7 @@ class BatchApi
         SystemConfig $systemConfig,
         SimpleProductRetriever $simpleProductRetriever,
         ConfigurableProductRetriever $configurableProductRetriever,
+        OtherProductRetriever $otherProductRetriever,
         Builder $builder
     ) {
         $this->fbeHelper = $helper;
@@ -90,7 +94,8 @@ class BatchApi
         $this->systemConfig = $systemConfig;
         $this->productRetrievers = [
             $simpleProductRetriever,
-            $configurableProductRetriever
+            $configurableProductRetriever,
+            $otherProductRetriever
         ];
         $this->builder = $builder;
     }
@@ -108,6 +113,19 @@ class BatchApi
         return [
             self::ATTR_METHOD => $method,
             self::ATTR_DATA => $this->builder->buildProductEntry($product)
+        ];
+    }
+
+    /**
+     * Build request for individual product
+     *
+     * @param string $productIdentifier
+     */
+    public function buildDeleteProductRequest(string $productIdentifier): array
+    {
+        return [
+            self::ATTR_METHOD => self::ATTR_DELETE,
+            self::ATTR_DATA => ['id' => $productIdentifier]
         ];
     }
 
@@ -158,7 +176,7 @@ class BatchApi
                         $requests[] = $this->buildProductRequest($product);
                     } catch (Exception $e) {
                         $exceptions++;
-                        $this->handleProductBuildException($exceptions, $e);
+                        $this->handleProductBuildException($exceptions, $e, $storeId);
                     }
 
                     if (count($requests) === self::BATCH_MAX) {
@@ -219,11 +237,17 @@ class BatchApi
      * @return void
      * @throws Exception
      */
-    private function handleProductBuildException(int $exceptions, Exception $e): void
+    private function handleProductBuildException(int $exceptions, Exception $e, $storeId): void
     {
         // Don't overload the logs, log the first 3 exceptions
         if ($exceptions <= 3) {
-            $this->fbeHelper->logException($e);
+            $context = [
+                'store_id' => $storeId,
+                'event' => 'batch_api',
+                'event_type' => 'batch_api_product_build',
+                'catalog_id' => $this->systemConfig->getCatalogId($storeId),
+            ];
+            $this->fbeHelper->logExceptionImmediatelyToMeta($e, $context);
         }
         // If it looks like a systemic failure : stop feed generation
         if ($exceptions > 100) {

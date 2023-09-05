@@ -24,19 +24,12 @@ use Magento\Catalog\Api\Data\ProductInterface;
 interface ProductRetrieverInterface
 {
     /**
-     * Set store Id
+     * Set store ID
      *
      * @param int $storeId
      * @return ProductRetrieverInterface
      */
     public function setStoreId($storeId);
-
-    /**
-     * Get product type
-     *
-     * @return string
-     */
-    public function getProductType();
 
     /**
      * Retrieve products

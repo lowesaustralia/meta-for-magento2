@@ -21,9 +21,11 @@ declare(strict_types=1);
 namespace Meta\Sales\Observer\Order;
 
 use Exception;
+use Meta\Sales\Model\Order\CreateRefund;
 use GuzzleHttp\Exception\GuzzleException;
 use Magento\Framework\Event\Observer;
 use Magento\Framework\Event\ObserverInterface;
+use Magento\Framework\Exception\LocalizedException;
 use Magento\Sales\Api\Data\CreditmemoInterface;
 use Magento\Sales\Api\Data\CreditmemoItemInterface as CreditmemoItem;
 use Magento\Sales\Api\Data\OrderPaymentInterface;
@@ -56,8 +58,8 @@ class Refund implements ObserverInterface
      * @param FacebookOrderInterfaceFactory $facebookOrderFactory
      */
     public function __construct(
-        SystemConfig $systemConfig,
-        GraphAPIAdapter $graphAPIAdapter,
+        SystemConfig                  $systemConfig,
+        GraphAPIAdapter               $graphAPIAdapter,
         FacebookOrderInterfaceFactory $facebookOrderFactory
     ) {
         $this->systemConfig = $systemConfig;
@@ -94,6 +96,17 @@ class Refund implements ObserverInterface
         $payment = $observer->getEvent()->getPayment();
         /** @var CreditmemoInterface $creditmemo */
         $creditmemo = $observer->getEvent()->getCreditmemo();
+        $comments = $creditmemo->getComments();
+
+        foreach ($comments as $comment) {
+            $commentText = $comment->getComment();
+            // You can now use $commentText, for example:
+            if (CreateRefund::CREDIT_MEMO_NOTE === $commentText) {
+                // This was a refund from Meta Commerce. No need to loop.
+                return;
+            }
+        }
+
         $storeId = $payment->getOrder()->getStoreId();
 
         if (!($this->systemConfig->isActiveExtension($storeId)
@@ -112,8 +125,12 @@ class Refund implements ObserverInterface
             return;
         }
 
-        if ($creditmemo->getAdjustment() > 0) {
-            throw new Exception('Cannot refund order on Facebook. Refunds with adjustments are not yet supported.');
+        $deductionAmount = $creditmemo->getAdjustment();
+        if ($deductionAmount > 0) {
+            throw new Exception('Cannot refund order on Facebook. Adjustment Refunds are not yet supported.');
+        } elseif ($deductionAmount < 0) {
+            // Magento allows Adjustment Fees to be negative, but the Graph API deductions must always be positive
+            $deductionAmount = abs($deductionAmount);
         }
 
         $refundItems = $this->getRefundItems($creditmemo, $payment);
@@ -132,6 +149,7 @@ class Refund implements ObserverInterface
             $facebookOrder->getFacebookOrderId(),
             $refundItems,
             $shippingRefundAmount,
+            $deductionAmount,
             $currencyCode,
             $reasonText
         );
@@ -146,16 +164,18 @@ class Refund implements ObserverInterface
      * @param string $fbOrderId
      * @param array $items
      * @param float|null $shippingRefundAmount
+     * @param float|null $deductionAmount
      * @param string|null $currencyCode
      * @param string|null $reasonText
      * @throws GuzzleException
      * @throws Exception
      */
     private function refundOrder(
-        int $storeId,
-        string $fbOrderId,
-        array $items,
-        ?float $shippingRefundAmount,
+        int     $storeId,
+        string  $fbOrderId,
+        array   $items,
+        ?float  $shippingRefundAmount,
+        ?float  $deductionAmount,
         ?string $currencyCode,
         ?string $reasonText = null
     ) {
@@ -168,16 +188,17 @@ class Refund implements ObserverInterface
                 $fbOrderId,
                 $items,
                 $shippingRefundAmount,
+                $deductionAmount,
                 $currencyCode,
                 $reasonText
             );
         } catch (GuzzleException $e) {
             $response = $e->getResponse();
-            $body = json_decode($response->getBody());
-            throw new Exception(__(
+            $body = json_decode((string)$response->getBody());
+            throw new LocalizedException(__(
                 'Error code: "%1"; Error message: "%2"',
                 (string)$body->error->code,
-                (string)($body->error->message ?? $body->error->error_user_msg)
+                (string)($body->error->error_user_msg ?? $body->error->message)
             ));
         }
     }
@@ -190,7 +211,7 @@ class Refund implements ObserverInterface
      * @return array
      */
     private function getRefundItems(
-        CreditmemoInterface $creditmemo,
+        CreditmemoInterface   $creditmemo,
         OrderPaymentInterface $payment
     ): array {
         $refundItems = [];

@@ -75,7 +75,14 @@ class CleanCache extends AbstractAjax
         } catch (\Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
-            $this->fbeHelper->logException($e);
+            $this->fbeHelper->logExceptionImmediatelyToMeta(
+                $e,
+                [
+                    'store_id' => $this->fbeHelper->getStore()->getId(),
+                    'event' => 'clean_cache',
+                    'event_type' => 'manual_clean'
+                ]
+            );
             return $response;
         }
     }
