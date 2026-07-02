@@ -1,0 +1,54 @@
+{
+    "name": "meta/meta-for-magento2",
+    "description": "Meta Business Extension for Magento 2",
+    "type": "metapackage",
+    "license": "Apache-2.0",
+    "repositories": [
+        {
+            "type": "path",
+            "url": "app/code/Meta/BusinessExtension",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
+            "url": "app/code/Meta/Catalog",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
+            "url": "app/code/Meta/Conversion",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
+            "url": "app/code/Meta/Promotions",
+            "options": {
+                "symlink": false
+            }
+        },
+        {
+            "type": "path",
+            "url": "app/code/Meta/Sales",
+            "options": {
+                "symlink": false
+            }
+        }
+    ],
+    "require": {
+        "php": "~8.5.0",
+        "meta/module-business-extension": "*",
+        "meta/module-catalog": "*",
+        "meta/module-conversion": "*",
+        "meta/module-promotions": "*",
+        "meta/module-sales": "*"
+    },
+    "conflict": {
+        "facebook/facebook-for-magento2": "*"
+    }
+}
